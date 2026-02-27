@@ -1,0 +1,5 @@
+.env
+db/
+*.crt
+*.key
+test.sh

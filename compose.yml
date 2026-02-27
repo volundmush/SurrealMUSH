@@ -1,0 +1,27 @@
+services:
+  surreal:
+    env_file: .env
+    image: surrealdb/surrealdb:latest
+    container_name: surrealmush-db
+    working_dir: /workspace/
+    volumes:
+      - ./db:/workspace/:z
+      - ${TLS_CERT_FILE}:/workspace/surrealmush.crt:ro,z
+      - ${TLS_KEY_FILE}:/workspace/surrealmush.key:ro,z
+    user: "${UID}:${UID}"
+    ports:
+      - 8442:8442
+    command: ["start", "--bind", "0.0.0.0:8442", "surrealkv://surrealkv"]
+  nginx:
+    env_file: .env
+    network_mode: host
+    image: nginx:latest
+    container_name: surrealmush-nginx
+    #user: "${UID}:${UID}"
+    ports:
+      - 8443:8443
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro,z
+      - ./static:/static:ro,z
+      - ${TLS_CERT_FILE}:/etc/nginx/certs/surrealmush.crt:ro,z
+      - ${TLS_KEY_FILE}:/etc/nginx/certs/surrealmush.key:ro,z
