@@ -1,0 +1,11 @@
+orjson
+rich
+dynaconf
+pydantic[email]
+loguru
+pyjwt
+fastapi[standard]
+hypercorn[h2]
+httpx[http2]
+httpx-sse
+lark

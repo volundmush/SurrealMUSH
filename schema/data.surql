@@ -42,7 +42,7 @@ DEFINE PARAM OVERWRITE $userConfig VALUE {
     "base_character_slots": 8
 };
 
--- The user table.
+-- Auth: User Table
 DEFINE TABLE OVERWRITE user SCHEMAFULL
     PERMISSIONS
         FOR select
@@ -57,29 +57,34 @@ DEFINE TABLE OVERWRITE user SCHEMAFULL
 
 DEFINE FIELD OVERWRITE name ON user TYPE string VALUE $value.trim() ASSERT fn::check_name($value, $baseConfig.name_length, "User Name");
 DEFINE FIELD OVERWRITE name_lower ON user TYPE string VALUE $value.trim().lowercase();
-DEFINE FIELD OVERWRITE password ON user TYPE string
-    PERMISSIONS
-        FOR select
-            WHERE fn::admin_override($auth.id, 6)
-        FOR update
-            WHERE fn::admin_override($auth.id, 6) AND $auth.admin_level > $this.admin_level
-;
 DEFINE FIELD OVERWRITE created_at ON user TYPE datetime READONLY DEFAULT ALWAYS time::now();
 DEFINE FIELD OVERWRITE updated_at ON user TYPE datetime READONLY VALUE time::now();
 DEFINE FIELD OVERWRITE deleted_name ON user TYPE option<string> DEFAULT none;
 DEFINE FIELD OVERWRITE deleted_at ON user TYPE option<datetime> DEFAULT none;
 DEFINE FIELD OVERWRITE is_deleted ON user COMPUTED !!deleted_at;
-DEFINE FIELD OVERWRITE admin_level ON user TYPE int DEFAULT 0
-    PERMISSIONS
-        FOR select
-            WHERE true
-        FOR update
-            WHERE $auth.admin_level > $input.admin_level
-;
 DEFINE FIELD OVERWRITE admin_mantle ON user TYPE bool DEFAULT false;
 DEFINE FIELD OVERWRITE extra_character_slots ON user TYPE int DEFAULT 0;
 
 DEFINE INDEX OVERWRITE name_lower_unique ON user FIELDS name_lower UNIQUE CONCURRENTLY;
+
+-- Auth: Passwords Table
+DEFINE TABLE OVERWRITE password SCHEMAFULL
+    PERMISSIONS
+        FOR select
+            WHERE $auth.id = $this.user OR fn::admin_override($auth.id, 7)
+        FOR create,delete,update
+            WHERE fn::admin_override($auth.id, 7)
+;
+DEFINE FIELD OVERWRITE user ON password TYPE record<user> READONLY;
+DEFINE FIELD OVERWRITE created_at ON password TYPE datetime READONLY DEFAULT ALWAYS time::now();
+DEFINE FIELD OVERWRITE hash ON password TYPE string READONLY;
+
+DEFINE FIELD OVERWRITE passwords ON user TYPE array<record<password>> COMPUTED (<~password ?? []);
+
+DEFINE FUNCTION OVERWRITE fn::latest_password($user: record<user>) -> option<record<password>> {
+    LET $latest_id = SELECT id FROM ONLY password WHERE user = $user ORDER BY created_at DESC LIMIT 1;
+    RETURN $latest_id;
+};
 
 DEFINE FUNCTION OVERWRITE fn::rename_thing($target: record, $new_name: string) {
     $target.name = $new_name;
@@ -98,7 +103,7 @@ DEFINE FUNCTION OVERWRITE fn::set_user_password($user: record<user>, $password: 
     IF $auth.id.admin_level <= $user.admin_level {
         throw "Insufficient permissions.";
     };
-    $user.password = crypto::argon2::generate($password);
+    CREATE password SET user = $user, scheme = "argon2", hash = crypto::argon2::generate($password);
 } PERMISSIONS WHERE fn::admin_override($auth.id, 5)
 ;
 
@@ -147,6 +152,32 @@ DEFINE FIELD OVERWRITE ip_address ON login_tracker TYPE string READONLY ASSERT $
 DEFINE FIELD OVERWRITE created_at ON login_tracker TYPE datetime READONLY DEFAULT ALWAYS time::now();
 DEFINE FIELD OVERWRITE success ON login_tracker TYPE bool READONLY DEFAULT false;
 
+DEFINE FUNCTION OVERWRITE fn::check_password_rhost($password: record<password>, $entry: string) -> bool {
+    -- This isn't going to work without Surrealism.
+    -- Rhost uses: https://man7.org/linux/man-pages/man3/crypt.3.html
+    LET $pieces = $password.hash.split("$");
+    LET $version = $pieces[0];
+    LET $salt = $pieces[1];
+    LET $hash = $pieces[2];
+    IF $version == "6" {
+        RETURN crypto::sha512($entry) == $hash;
+    };
+    RETURN false;
+};
+
+DEFINE FUNCTION OVERWRITE fn::check_password($password: record<password>, $entry: string) -> bool {
+    IF $password.hash.starts_with("$argon2") {
+        RETURN crypto::argon2::compare($password.hash, $entry);
+    } ELSE IF $password.hash.starts_with("$6") {
+        LET $result = fn::check_password_rhost($password, $entry);
+        IF $result {
+            CREATE password SET user = $user, hash = crypto::argon2::generate($entry);
+        }
+        RETURN $result;
+    };
+    RETURN false;
+};
+
 DEFINE FUNCTION OVERWRITE fn::login_user($username: string, $password: string) {
     LET $user_search = SELECT * FROM ONLY user WHERE name_lower = $username.trim().lowercase() LIMIT 1;
     IF !$user_search {
@@ -154,6 +185,11 @@ DEFINE FUNCTION OVERWRITE fn::login_user($username: string, $password: string) {
     };
 
     LET $user = $user_search.id;
+
+    LET $latest_password = fn::latest_password($user);
+    IF !$latest_password {
+        throw "Invalid credentials.";
+    };
 
     LET $ip = session::ip() ?? "";
 
@@ -287,9 +323,9 @@ DEFINE FIELD OVERWRITE all_permissions ON faction_membership COMPUTED permission
 
 DEFINE INDEX OVERWRITE faction_membership_unique ON faction_membership FIELDS faction, member UNIQUE;
 
-DEFINE FIELD OVERWRITE holders ON faction_rank COMPUTED <~faction_membership;
-DEFINE FIELD OVERWRITE faction_memberships ON pc COMPUTED <~faction_membership;
-DEFINE FIELD OVERWRITE members ON faction COMPUTED <set>(<~faction_membership).map(|$m| $m.member);
+DEFINE FIELD OVERWRITE holders ON faction_rank COMPUTED (<~faction_membership ?? []);
+DEFINE FIELD OVERWRITE faction_memberships ON pc COMPUTED (<~faction_membership ?? []);
+DEFINE FIELD OVERWRITE members ON faction COMPUTED <set>(<~faction_membership ?? []).map(|$m| $m.member);
 
 -- The Theme System for roleplaying.
 DEFINE TABLE OVERWRITE theme SCHEMAFULL;
@@ -314,7 +350,7 @@ DEFINE FIELD OVERWRITE role ON theme_member TYPE int DEFAULT 0;
 
 DEFINE INDEX OVERWRITE theme_member_theme_member ON theme_member FIELDS theme, member UNIQUE CONCURRENTLY;
 
-DEFINE FIELD OVERWRITE members ON theme COMPUTED (<~theme_member).map(|$m| $m.member);
+DEFINE FIELD OVERWRITE members ON theme COMPUTED (<~theme_member ?? []).map(|$m| $m.member);
 
 -- Permission Checking System
 DEFINE FUNCTION OVERWRITE fn::lock_check_rule_faction($pc: record<pc>, $faction: record<faction>, $rule: array) -> bool {
@@ -392,12 +428,18 @@ COMMENT "Core function for lock checks."
 
 -- Roleplay Logging: Actors
 DEFINE TABLE OVERWRITE actor SCHEMAFULL;
-DEFINE FIELD OVERWRITE user ON actor TYPE record<user> REFERENCE;
 DEFINE FIELD OVERWRITE pc ON actor TYPE record<pc> REFERENCE;
 DEFINE FIELD OVERWRITE name ON actor TYPE string;
 DEFINE FIELD OVERWRITE name_lower ON actor TYPE string READONLY VALUE $name.lowercase();
 
 DEFINE INDEX OVERWRITE actor_unique ON actor FIELDS pc, name_lower UNIQUE;
+
+-- Roleplay Logging: ActingAs
+DEFINE TABLE OVERWRITE acting_as SCHEMAFULL;
+DEFINE FIELD OVERWRITE user ON acting_as TYPE record<user> REFERENCE;
+DEFINE FIELD OVERWRITE actor ON acting_as TYPE record<actor> REFERENCE;
+
+DEFINE INDEX OVERWRITE acting_as_unique ON acting_as FIELDS user, actor UNIQUE;
 
 -- Roleplay Logging: Plots
 DEFINE TABLE OVERWRITE plot SCHEMAFULL;
@@ -500,8 +542,7 @@ DEFINE INDEX OVERWRITE channel_name_unique ON channel FIELDS sys,name_lower UNIQ
 -- Channel System: Message
 DEFINE TABLE OVERWRITE channel_msg SCHEMAFULL;
 DEFINE FIELD OVERWRITE channel ON channel_msg TYPE record<channel> REFERENCE;
-DEFINE FIELD OVERWRITE user ON channel_msg TYPE option<record<user>> REFERENCE;
-DEFINE FIELD OVERWRITE character ON channel_msg TYPE option<record<pc>> REFERENCE;
+DEFINE FIELD OVERWRITE acting_as ON channel_msg TYPE record<acting_as> REFERENCE;
 DEFINE FIELD OVERWRITE content ON channel_msg TYPE string;
 DEFINE FIELD OVERWRITE created_at ON channel_msg TYPE datetime READONLY DEFAULT ALWAYS time::now();
 DEFINE FIELD OVERWRITE updated_at ON channel_msg TYPE datetime READONLY VALUE time::now();
@@ -509,6 +550,31 @@ DEFINE FIELD OVERWRITE deleted_at ON channel_msg TYPE option<datetime> DEFAULT n
 DEFINE FIELD OVERWRITE is_deleted ON channel_msg COMPUTED !!deleted_at;
 
 DEFINE INDEX OVERWRITE channel_msg_channel ON channel_msg FIELDS channel,created_at UNIQUE CONCURRENTLY;
+
+-- BBS System: Boards
+DEFINE TABLE OVERWRITE bbs_board SCHEMAFULL;
+DEFINE FIELD OVERWRITE name ON bbs_board TYPE string;
+DEFINE FIELD OVERWRITE description ON bbs_board TYPE string;
+DEFINE FIELD OVERWRITE created_at ON bbs_board TYPE datetime READONLY DEFAULT ALWAYS time::now();
+DEFINE FIELD OVERWRITE updated_at ON bbs_board TYPE datetime READONLY VALUE time::now();
+DEFINE FIELD OVERWRITE deleted_at ON bbs_board TYPE option<datetime> DEFAULT none;
+DEFINE FIELD OVERWRITE is_deleted ON bbs_board COMPUTED !!deleted_at;
+DEFINE FIELD OVERWRITE order ON bbs_board TYPE int;
+DEFINE FIELD OVERWRITE faction ON bbs_board TYPE option<record<faction>> REFERENCE;
+DEFINE FIELD OVERWRITE board_id ON bbs_board TYPE string COMPUTED string::concat(faction.name ?? '', order);
+DEFINE FIELD OVERWRITE locks ON bbs_board TYPE object FLEXIBLE;
+DEFINE FIELD OVERWRITE next_id ON bbs_board TYPE int DEFAULT 1;
+
+-- BBS System: Posts
+DEFINE TABLE OVERWRITE bbs_post SCHEMAFULL;
+DEFINE FIELD OVERWRITE board ON bbs_post TYPE record<bbs_board> REFERENCE;
+DEFINE FIELD OVERWRITE title ON bbs_post TYPE string;
+DEFINE FIELD OVERWRITE content ON bbs_post TYPE string;
+DEFINE FIELD OVERWRITE created_at ON bbs_post TYPE datetime READONLY DEFAULT ALWAYS time::now();
+DEFINE FIELD OVERWRITE updated_at ON bbs_post TYPE datetime READONLY VALUE time::now();
+DEFINE FIELD OVERWRITE deleted_at ON bbs_post TYPE option<datetime> DEFAULT none;
+DEFINE FIELD OVERWRITE is_deleted ON bbs_post COMPUTED !!deleted_at;
+DEFINE FIELD OVERWRITE acting_as ON bbs_post TYPE record<actor> REFERENCE;
 
 -- Info System - Folders
 DEFINE TABLE OVERWRITE textfolder SCHEMAFULL;
@@ -533,11 +599,11 @@ DEFINE FIELD OVERWRITE is_approved ON textfile COMPUTED !!approved_at;
 DEFINE INDEX OVERWRITE name_lower_unique ON textfile FIELDS folder,name_lower UNIQUE CONCURRENTLY;
 
 -- Info System - Computed Fields
-DEFINE FIELD OVERWRITE files ON textfolder COMPUTED <~textfile;
-DEFINE FIELD OVERWRITE textfolders ON user COMPUTED object::from_entries((<~textfolder).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
-DEFINE FIELD OVERWRITE textfolders ON pc COMPUTED object::from_entries((<~textfolder).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
-DEFINE FIELD OVERWRITE textfolders ON theme COMPUTED object::from_entries((<~textfolder).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
-DEFINE FIELD OVERWRITE textfolders ON faction COMPUTED object::from_entries((<~textfolder).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
-DEFINE FIELD OVERWRITE textfolders ON location COMPUTED object::from_entries((<~textfolder).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
-DEFINE FIELD OVERWRITE textfolders ON plot COMPUTED object::from_entries((<~textfolder).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
-DEFINE FIELD OVERWRITE textfolders ON scene COMPUTED object::from_entries((<~textfolder).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
+DEFINE FIELD OVERWRITE files ON textfolder COMPUTED (<~textfile ?? []);
+DEFINE FIELD OVERWRITE textfolders ON user COMPUTED object::from_entries((<~textfolder ?? []).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
+DEFINE FIELD OVERWRITE textfolders ON pc COMPUTED object::from_entries((<~textfolder ?? []).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
+DEFINE FIELD OVERWRITE textfolders ON theme COMPUTED object::from_entries((<~textfolder ?? []).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
+DEFINE FIELD OVERWRITE textfolders ON faction COMPUTED object::from_entries((<~textfolder ?? []).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
+DEFINE FIELD OVERWRITE textfolders ON location COMPUTED object::from_entries((<~textfolder ?? []).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
+DEFINE FIELD OVERWRITE textfolders ON plot COMPUTED object::from_entries((<~textfolder ?? []).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));
+DEFINE FIELD OVERWRITE textfolders ON scene COMPUTED object::from_entries((<~textfolder ?? []).map(|$f| [$f.name, object::from_entries($f.map(|$fi| [$fi.name, $fi]))]));

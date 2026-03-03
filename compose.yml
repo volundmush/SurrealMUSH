@@ -10,8 +10,8 @@ services:
       - ${TLS_KEY_FILE}:/workspace/surrealmush.key:ro,z
     user: "${UID}:${UID}"
     ports:
-      - 8442:8442
-    command: ["start", "--bind", "0.0.0.0:8442", "surrealkv://surrealkv"]
+      - ${SURREALDB_PORT}:8000
+    command: ["start", "--bind", "0.0.0.0:8000", "surrealkv://surrealkv"]
   nginx:
     env_file: .env
     network_mode: host
@@ -19,7 +19,7 @@ services:
     container_name: surrealmush-nginx
     #user: "${UID}:${UID}"
     ports:
-      - 8443:8443
+      - ${NGINX_PORT}:8443
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro,z
       - ./static:/static:ro,z
