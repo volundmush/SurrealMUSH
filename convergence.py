@@ -1,9 +1,12 @@
 import asyncio
+import os
 import typing
 from collections import defaultdict
 
-from rhost.models import Database, MushAttrbute, MushObject, ObjectType
-from rhost.reader import parse_flatfile
+from dotenv import load_dotenv
+from surrealdb import AsyncSurreal
+
+from rhost import Database, MushAttribute, MushObject, ObjectType, parse_flatfile
 
 ACCOUNTS_MUSH: dict[int, MushObject] = dict()
 ACCOUNTS_RECORD: dict[int, str] = dict()
@@ -63,9 +66,19 @@ async def prepare_pcs(db: Database):
 
 
 async def main():
-    db = parse_flatfile("netrhost.db.flat")
-    await prepare_accounts(db)
-    await prepare_pcs(db)
+    load_dotenv()
+    data = parse_flatfile("netrhost.db.flat")
+    await prepare_accounts(data)
+    await prepare_pcs(data)
+
+    db = AsyncSurreal(f"ws://localhost:{os.getenv('SURREALDB_PORT')}")
+
+    await db.signin(
+        {"user": os.getenv("SURREAL_USER"), "pass": os.getenv("SURREAL_PASS")}
+    )
+    await db.use(
+        os.getenv("SURREAL_DEFAULT_NAMESPACE"), os.getenv("SURREAL_DEFAULT_DATABASE")
+    )
 
 
 if __name__ == "__main__":

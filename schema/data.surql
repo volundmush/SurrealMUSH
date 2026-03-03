@@ -67,6 +67,17 @@ DEFINE FIELD OVERWRITE extra_character_slots ON user TYPE int DEFAULT 0;
 
 DEFINE INDEX OVERWRITE name_lower_unique ON user FIELDS name_lower UNIQUE CONCURRENTLY;
 
+-- Auth: Email Table
+DEFINE TABLE OVERWRITE linked_email SCHEMAFULL;
+DEFINE FIELD OVERWRITE user ON linked_email TYPE record<user> READONLY;
+DEFINE FIELD OVERWRITE email ON linked_email TYPE string READONLY ASSERT $value.is_email();
+DEFINE FIELD OVERWRITE provider ON linked_email TYPE string READONLY;
+DEFINE FIELD OVERWRITE created_at ON linked_email TYPE datetime READONLY DEFAULT ALWAYS time::now();
+DEFINE FIELD OVERWRITE verified_at ON linked_email TYPE option<datetime> DEFAULT none;
+DEFINE FIELD OVERWRITE metadata ON linked_email TYPE object FLEXIBLE;
+
+DEFINE INDEX OVERWRITE email_unique ON linked_email FIELDS email UNIQUE CONCURRENTLY;
+
 -- Auth: Passwords Table
 DEFINE TABLE OVERWRITE password SCHEMAFULL
     PERMISSIONS
@@ -91,10 +102,7 @@ DEFINE FUNCTION OVERWRITE fn::rename_thing($target: record, $new_name: string) {
     $target.name_lower = $new_name.lowercase();
 };
 
-DEFINE FUNCTION OVERWRITE fn::create_user($name: string, $password: string) {
-    CREATE user SET name = $name.trim(), password = crypto::argon2::generate($password);
-} PERMISSIONS WHERE fn::admin_override($auth.id, 5)
-;
+
 
 DEFINE FUNCTION OVERWRITE fn::set_user_password($user: record<user>, $password: string) {
     IF $user.deleted_at {
@@ -103,7 +111,14 @@ DEFINE FUNCTION OVERWRITE fn::set_user_password($user: record<user>, $password: 
     IF $auth.id.admin_level <= $user.admin_level {
         throw "Insufficient permissions.";
     };
-    CREATE password SET user = $user, scheme = "argon2", hash = crypto::argon2::generate($password);
+    CREATE password SET user = $user, hash = crypto::argon2::generate($password);
+} PERMISSIONS WHERE fn::admin_override($auth.id, 5)
+;
+
+DEFINE FUNCTION OVERWRITE fn::create_user($name: string, $password: string) {
+    LET $user =CREATE user SET name = $name.trim();
+    fn::set_user_password($user, $password);
+    RETURN $user;
 } PERMISSIONS WHERE fn::admin_override($auth.id, 5)
 ;
 

@@ -9,3 +9,5 @@ hypercorn[h2]
 httpx[http2]
 httpx-sse
 lark
+surrealdb==2.0.0-alpha1
+dotenv
